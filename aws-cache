@@ -58,7 +58,7 @@ try:
 except ImportError:
     URLLIB_AVAILABLE = False
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 class AWSCache:
     def __init__(self, cache_dir=None, default_ttl=300):

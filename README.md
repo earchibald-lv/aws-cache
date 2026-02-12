@@ -12,10 +12,10 @@ Fastest and most reliable installation with concurrent dependency resolution and
 
 ```bash
 # Install directly from GitHub
-uv pip install earchibald/aws-cache
+uv pip install earchibald-lv/aws-cache
 
 # Or use uv tool for isolated installation
-uv tool install earchibald/aws-cache
+uv tool install earchibald-lv/aws-cache
 ```
 
 **Why uv?** Significantly faster than pip, concurrent resolution, deterministic builds, and native git support.
@@ -25,9 +25,7 @@ uv tool install earchibald/aws-cache
 Good for isolated installation without affecting your system Python:
 
 ```bash
-git clone https://github.com/earchibald/aws-cache.git
-cd aws-cache
-pipx install .
+pipx install https://github.com/earchibald-lv/aws-cache.git
 ```
 
 **Why pipx?** Creates isolated virtual environment, easy to update/uninstall, prevents dependency conflicts.
@@ -37,8 +35,10 @@ pipx install .
 If you plan to contribute or test the latest features:
 
 ```bash
-git clone https://github.com/earchibald/aws-cache.git
+git clone https://github.com/earchibald-lv/aws-cache.git
 cd aws-cache
+python3 -mvenv venv
+. venv/bin/activate
 pip install -e ".[dev]"
 ```
 

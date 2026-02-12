@@ -66,6 +66,12 @@ class AWSCache:
                                                          os.path.expanduser('~/.aws-cache')))
         self.cache_dir.mkdir(exist_ok=True)
         self.default_ttl = int(os.environ.get('AWS_CACHE_TTL', default_ttl))
+        # Cache statistics tracking
+        self._stats = {
+            'hits': 0,
+            'misses': 0,
+            'total_calls': 0
+        }
 
     def _extract_profile_from_args(self, aws_args):
         """Extract profile from CLI args if present (e.g., --profile foo or --profile=foo)."""
@@ -490,7 +496,13 @@ class AWSCache:
         if use_cache and cache_file and self._is_cache_valid(cache_file, ttl):
             stdout, stderr, returncode = self._read_cache(cache_file)
             if stdout is not None:
+                self._stats['hits'] += 1
+                self._stats['total_calls'] += 1
                 return stdout, stderr, returncode
+
+        # Cache miss
+        self._stats['misses'] += 1
+        self._stats['total_calls'] += 1
 
         # Execute AWS CLI command
         try:
@@ -511,6 +523,10 @@ class AWSCache:
             return '', 'AWS CLI command timed out', 124
         except FileNotFoundError:
             return '', 'AWS CLI not found in PATH', 127
+
+    def get_cache_stats(self):
+        """Get cache statistics (hits, misses, total calls)."""
+        return self._stats.copy()
 
     def clear_cache(self):
         """Clear entire cache"""

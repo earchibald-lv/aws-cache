@@ -58,7 +58,7 @@ try:
 except ImportError:
     URLLIB_AVAILABLE = False
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 class AWSCache:
     def __init__(self, cache_dir=None, default_ttl=300):
@@ -67,12 +67,26 @@ class AWSCache:
         self.cache_dir.mkdir(exist_ok=True)
         self.default_ttl = int(os.environ.get('AWS_CACHE_TTL', default_ttl))
 
-    def _get_aws_context(self):
+    def _extract_profile_from_args(self, aws_args):
+        """Extract profile from CLI args if present (e.g., --profile foo or --profile=foo)."""
+        if not aws_args:
+            return None
+
+        for i, arg in enumerate(aws_args):
+            if arg == '--profile' and i + 1 < len(aws_args):
+                return aws_args[i + 1]
+            if arg.startswith('--profile='):
+                return arg.split('=', 1)[1] or None
+
+        return None
+
+    def _get_aws_context(self, aws_args):
         """Get AWS context (profile, region) for cache key uniqueness"""
         context = {}
 
-        # Get current profile
-        context['profile'] = os.environ.get('AWS_PROFILE', 'default')
+        # Prefer explicit --profile in args, then AWS_PROFILE env, else default
+        cli_profile = self._extract_profile_from_args(aws_args)
+        context['profile'] = cli_profile or os.environ.get('AWS_PROFILE', 'default')
 
         # Get current region
         region = os.environ.get('AWS_DEFAULT_REGION')
@@ -134,7 +148,7 @@ class AWSCache:
 
     def _get_cache_key(self, aws_args):
         """Generate unique cache key for AWS command"""
-        context = self._get_aws_context()
+        context = self._get_aws_context(aws_args)
 
         # Normalize arguments for consistent cache keys
         normalized_args = self._normalize_aws_args(aws_args)

@@ -19,6 +19,7 @@ Cache Control:
     --cache-ttl SECONDS Override default cache time (300 seconds)
     --cache-clear       Clear all cached data
     --cache-dir DIR     Use custom cache directory
+    --allow-insecure-ssl Allow insecure SSL (for VPN/proxy environments)
 
 Setup:
     --completions bash  Enable tab completion: eval "$(aws-cache --completions bash)"
@@ -26,9 +27,10 @@ Setup:
     --help             Show this help
 
 Environment Variables:
-    AWS_CACHE_DISABLE=1    Disable caching globally
-    AWS_CACHE_TTL=600      Change default cache time
-    AWS_CACHE_DIR=path     Use custom cache location
+    AWS_CACHE_DISABLE=1           Disable caching globally
+    AWS_CACHE_TTL=600             Change default cache time
+    AWS_CACHE_DIR=path            Use custom cache location
+    AWS_CACHE_ALLOW_INSECURE_SSL=1 Allow insecure SSL connections
 
 What Gets Cached:
     ✓ Read operations (describe, list, get, show)
@@ -70,7 +72,7 @@ CACHE_DIR_MODE = 0o700   # Owner read/write/execute only
 MAX_CACHE_DIR_DEPTH = 3  # Maximum directory depth for safety
 
 class AWSCache:
-    def __init__(self, cache_dir: Optional[str] = None, default_ttl: int = 300):
+    def __init__(self, cache_dir: Optional[str] = None, default_ttl: int = 300, allow_insecure_ssl: bool = False):
         # Validate and sanitize cache directory path
         cache_path = cache_dir or os.environ.get('AWS_CACHE_DIR', os.path.expanduser('~/.aws-cache'))
         self.cache_dir = self._validate_cache_dir(cache_path)
@@ -81,6 +83,12 @@ class AWSCache:
         self.cache_dir.chmod(CACHE_DIR_MODE)
         
         self.default_ttl = int(os.environ.get('AWS_CACHE_TTL', default_ttl))
+        
+        # SSL configuration for VPN/corporate proxy environments
+        self.allow_insecure_ssl = allow_insecure_ssl or os.environ.get('AWS_CACHE_ALLOW_INSECURE_SSL') == '1'
+        if self.allow_insecure_ssl:
+            print("⚠️  WARNING: SSL certificate verification is DISABLED", file=sys.stderr)
+            print("   This should only be used in trusted VPN/corporate proxy environments", file=sys.stderr)
     
     def _validate_cache_dir(self, cache_path: str) -> Path:
         """Validate cache directory path to prevent path traversal attacks"""
@@ -272,6 +280,7 @@ class AWSCache:
 
     def _write_cache(self, cache_file: Path, stdout: str, stderr: str, returncode: int, command: List[str]) -> None:
         """Write result to cache with secure file permissions"""
+        temp_file = None
         try:
             # Security check: Don't cache if output contains credentials
             if self._contains_sensitive_data(stdout) or self._contains_sensitive_data(stderr):
@@ -304,7 +313,7 @@ class AWSCache:
             if temp_file and temp_file.exists():
                 try:
                     temp_file.unlink()
-                except:
+                except (IOError, OSError):
                     pass
             # Fail silently if can't write cache
 
@@ -331,8 +340,9 @@ class AWSCache:
     def _save_operation_cache(self, operation_cache: Dict[str, str]) -> None:
         """Save operation types to cache with secure permissions"""
         cache_file = self.cache_dir / "operation-types.json"
-        temp_file = cache_file.with_suffix('.tmp')
+        temp_file = None
         try:
+            temp_file = cache_file.with_suffix('.tmp')
             with open(temp_file, 'w') as f:
                 json.dump(operation_cache, f, indent=2)
             
@@ -342,10 +352,10 @@ class AWSCache:
             # Atomic rename
             temp_file.replace(cache_file)
         except (IOError, OSError):
-            if temp_file.exists():
+            if temp_file and temp_file.exists():
                 try:
                     temp_file.unlink()
-                except:
+                except (IOError, OSError):
                     pass
 
     def _load_authoritative_cache(self):
@@ -365,8 +375,9 @@ class AWSCache:
     def _save_authoritative_cache(self, action_cache: Dict[str, str]) -> None:
         """Save authoritative AWS service reference cache with secure permissions"""
         cache_file = self.cache_dir / "aws-service-reference.json"
-        temp_file = cache_file.with_suffix('.tmp')
+        temp_file = None
         try:
+            temp_file = cache_file.with_suffix('.tmp')
             with open(temp_file, 'w') as f:
                 json.dump(action_cache, f, indent=2)
             
@@ -376,11 +387,33 @@ class AWSCache:
             # Atomic rename
             temp_file.replace(cache_file)
         except (IOError, OSError):
-            if temp_file.exists():
+            if temp_file and temp_file.exists():
                 try:
                     temp_file.unlink()
-                except:
+                except (IOError, OSError):
                     pass
+
+    def _create_ssl_context(self) -> ssl.SSLContext:
+        """Create SSL context with appropriate certificate verification settings"""
+        if self.allow_insecure_ssl:
+            # Create context that doesn't verify certificates (for VPN/proxy environments)
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            return ssl_context
+        else:
+            # Create secure context with full certificate verification
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+            
+            # Try to load system certificates in addition to defaults
+            try:
+                ssl_context.load_default_certs()
+            except (OSError, ssl.SSLError):
+                pass  # Continue with default certificates
+            
+            return ssl_context
 
     def _fetch_aws_service_list(self) -> List[str]:
         """Fetch list of AWS services from service reference API with SSL verification"""
@@ -388,10 +421,8 @@ class AWSCache:
             return []
 
         try:
-            # Create SSL context with certificate verification
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = True
-            ssl_context.verify_mode = ssl.CERT_REQUIRED
+            # Create SSL context based on configuration
+            ssl_context = self._create_ssl_context()
             
             req = urllib.request.Request(
                 'https://servicereference.us-east-1.amazonaws.com',
@@ -421,10 +452,8 @@ class AWSCache:
             return {}
 
         try:
-            # Create SSL context with certificate verification
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = True
-            ssl_context.verify_mode = ssl.CERT_REQUIRED
+            # Create SSL context based on configuration
+            ssl_context = self._create_ssl_context()
             
             url = f"https://servicereference.us-east-1.amazonaws.com/v1/{service_name}/{service_name}.json"
             req = urllib.request.Request(
@@ -653,13 +682,16 @@ class AWSCache:
             return aws_args
         
         sanitized = []
+        # Regular expression to match control characters (except tab, newline, carriage return)
+        control_char_pattern = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+        
         for arg in aws_args:
             # Ensure arguments are strings
             if not isinstance(arg, str):
                 continue
             
-            # Don't allow null bytes or other control characters
-            if '\x00' in arg or any(ord(c) < 32 and c not in '\t\n\r' for c in arg):
+            # Check for null bytes or other control characters
+            if control_char_pattern.search(arg):
                 print(f"⚠ Warning: Rejected argument with control characters", file=sys.stderr)
                 continue
             
@@ -751,6 +783,8 @@ def main():
     parser.add_argument('--cache-ttl', type=int, help='Cache TTL in seconds')
     parser.add_argument('--cache-clear', action='store_true', help='Clear cache and exit')
     parser.add_argument('--cache-dir', help='Cache directory')
+    parser.add_argument('--allow-insecure-ssl', action='store_true', 
+                       help='Allow insecure SSL (for VPN/corporate proxy environments)')
     parser.add_argument('--completions', choices=['bash'], help='Generate shell completions')
     parser.add_argument('--version', action='store_true', help='Show version')
     parser.add_argument('--help', action='store_true', help='Show help')
@@ -824,7 +858,11 @@ def main():
         return 0
 
     # Initialize cache
-    cache = AWSCache(cache_dir=args.cache_dir, default_ttl=args.cache_ttl or 300)
+    cache = AWSCache(
+        cache_dir=args.cache_dir, 
+        default_ttl=args.cache_ttl or 300,
+        allow_insecure_ssl=args.allow_insecure_ssl
+    )
 
     if args.cache_clear:
         cache.clear_cache()

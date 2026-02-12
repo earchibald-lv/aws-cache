@@ -12,10 +12,10 @@ Fastest and most reliable installation with concurrent dependency resolution and
 
 ```bash
 # Install directly from GitHub
-uv pip install git+https://github.com/earchibald/aws-cache.git
+uv pip install earchibald/aws-cache
 
 # Or use uv tool for isolated installation
-uv tool install git+https://github.com/earchibald/aws-cache.git
+uv tool install earchibald/aws-cache
 ```
 
 **Why uv?** Significantly faster than pip, concurrent resolution, deterministic builds, and native git support.

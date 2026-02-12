@@ -1,13 +1,23 @@
-# AWS CLI Caching Wrapper v0.4.0
+# AWS CLI Caching Wrapper v0.5.0
 
 A high-performance caching layer for AWS CLI commands that reduces API calls, improves response times, and maintains accuracy. Features intelligent argument normalization, enhanced command structures, smart argument handling, and authoritative read/write detection for maximum cache efficiency and user-friendliness.
 
 ## Installation
 
+### Option 1: Direct Script (Development)
 ```bash
 # Copy script to your PATH
 cp aws-cache ~/bin/aws-cache  # or /usr/local/bin/aws-cache
 chmod +x ~/bin/aws-cache
+```
+
+### Option 2: Package Installation (Modern)
+```bash
+# Install from local source with development dependencies
+pip install -e ".[dev]"
+
+# Or standard installation
+pip install .
 ```
 
 ## Usage
@@ -101,6 +111,7 @@ $ aws-cache aws sts get-caller-identity
 - **API Efficiency**: Reduces AWS API calls and potential throttling
 - **Token Usage**: Smaller context in Claude conversations
 - **Cost**: Lower AWS API charges for development workflows
+### Quick Test
 
 ## Cache Location
 
@@ -113,7 +124,22 @@ Default: `~/.aws-cache/`
 
 ```bash
 # Test basic functionality
-./aws-cache sts get-caller-identity
+./a
+
+### Running Tests with pytest
+```bash
+# Install development dependencies
+pip install -e ".[dev]"
+
+# Run all tests
+pytest
+
+# Run tests with coverage
+pytest --cov=aws_cache --cov-report=term-missing
+
+# Run specific test file
+pytest tests/test_cache_context.py -v
+```ws-cache sts get-caller-identity
 
 # Verify caching (second call should be faster)
 time ./aws-cache sts get-caller-identity

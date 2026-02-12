@@ -263,13 +263,13 @@ class AWSCache:
             return False
         
         # Patterns that suggest sensitive data
-        # AWS Access Key IDs can start with:
-        # - AKIA (long-term credentials)
-        # - ASIA (temporary/session credentials)
-        # - AIDA (IAM user IDs)
+        # AWS Access Key IDs are 20 characters total:
+        # - AKIA (long-term credentials) + 16 alphanumeric = 20 chars total
+        # - ASIA (temporary/session credentials) + 16 alphanumeric = 20 chars total
+        # - AIDA (IAM user IDs) + 16 alphanumeric = 20 chars total
         sensitive_patterns = [
-            r'A[KS]IA[0-9A-Z]{16}',  # AWS Access Key ID (AKIA or ASIA)
-            r'AIDA[0-9A-Z]{16}',      # IAM User ID
+            r'A[KS]IA[0-9A-Z]{16}',  # AWS Access Key ID (AKIA or ASIA) - 20 chars total
+            r'AIDA[0-9A-Z]{16}',      # IAM User ID - 20 chars total
             r'aws_secret_access_key',
             r'aws_session_token',
             r'"SecretAccessKey"',
@@ -682,7 +682,19 @@ class AWSCache:
         return operation_type == 'read'
 
     def _sanitize_aws_args(self, aws_args: List[str]) -> List[str]:
-        """Sanitize AWS arguments to prevent command injection"""
+        """Sanitize AWS arguments to prevent command injection.
+        
+        Allows tab, newline, and carriage return characters since AWS CLI arguments
+        may legitimately contain these (e.g., in JSON payloads, multiline strings).
+        Rejects null bytes and other control characters that should never appear
+        in valid AWS CLI arguments.
+        
+        Args:
+            aws_args: List of AWS CLI arguments to sanitize
+            
+        Returns:
+            List of sanitized arguments with dangerous control characters removed
+        """
         if not aws_args:
             return aws_args
         

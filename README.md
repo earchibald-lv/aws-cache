@@ -1,24 +1,65 @@
-# AWS CLI Caching Wrapper v0.5.0
+# AWS CLI Caching Wrapper v0.6.0
 
 A high-performance caching layer for AWS CLI commands that reduces API calls, improves response times, and maintains accuracy. Features intelligent argument normalization, enhanced command structures, smart argument handling, and authoritative read/write detection for maximum cache efficiency and user-friendliness.
 
 ## Installation
 
-### Option 1: Direct Script (Development)
+Choose the installation method that best fits your workflow:
+
+### Method 1: Install with uv (Recommended)
+
+Fastest and most reliable installation with concurrent dependency resolution and reproducible builds:
+
 ```bash
-# Copy script to your PATH
-cp aws-cache ~/bin/aws-cache  # or /usr/local/bin/aws-cache
-chmod +x ~/bin/aws-cache
+# Install directly from GitHub
+uv pip install git+https://github.com/earchibald/aws-cache.git
+
+# Or use uv tool for isolated installation
+uv tool install git+https://github.com/earchibald/aws-cache.git
 ```
 
-### Option 2: Package Installation (Modern)
+**Why uv?** Significantly faster than pip, concurrent resolution, deterministic builds, and native git support.
+
+### Method 2: Clone and Install with pipx
+
+Good for isolated installation without affecting your system Python:
+
 ```bash
-# Install from local source with development dependencies
+git clone https://github.com/earchibald/aws-cache.git
+cd aws-cache
+pipx install .
+```
+
+**Why pipx?** Creates isolated virtual environment, easy to update/uninstall, prevents dependency conflicts.
+
+### Method 3: Install for Development
+
+If you plan to contribute or test the latest features:
+
+```bash
+git clone https://github.com/earchibald/aws-cache.git
+cd aws-cache
 pip install -e ".[dev]"
-
-# Or standard installation
-pip install .
 ```
+
+This installs the package in editable mode with development dependencies (testing, linting, etc.).
+
+### Verify Installation
+
+After installation, verify everything is working:
+
+```bash
+# Check installed version
+aws-cache --version
+
+# View help
+aws-cache --help
+
+# Test with a read operation (should cache results)
+aws-cache sts get-caller-identity
+```
+
+**Requirements**: Python 3.8 or later. Zero external dependencies—uses only Python standard library.
 
 ## Usage
 

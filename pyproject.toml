@@ -1,0 +1,168 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aws-cache"
+version = "0.5.0"
+description = "A lightweight Python3 wrapper that adds intelligent caching to AWS CLI commands. Reduces API latency 10-100x for safe read operations using authoritative AWS Service Reference classifications. Zero external runtime dependencies."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "EArchibald", email = "contact@example.com"},
+]
+keywords = [
+    "aws",
+    "cli",
+    "cache",
+    "performance",
+    "aws-cli",
+    "caching",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Shells",
+    "Topic :: System :: Systems Administration",
+    "Topic :: System :: Networking",
+]
+
+# Runtime dependencies: ZERO (only stdlib)
+dependencies = []
+
+# Optional development dependencies
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "coverage[toml]>=7.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/earchibald/aws-cache"
+Repository = "https://github.com/earchibald/aws-cache.git"
+Documentation = "https://github.com/earchibald/aws-cache#readme"
+Issues = "https://github.com/earchibald/aws-cache/issues"
+
+# Note on Installation:
+# The aws-cache file remains a standalone executable for maximum portability.
+# For development/testing with pip install -e ".[dev]", users can either:
+# 1. Use the standalone script directly: ./aws-cache <command>
+# 2. Create an alias: alias aws-cache=./aws-cache
+#
+# To make it fully pip-installable with a console script, rename aws-cache → aws_cache.py
+# and uncomment the [project.scripts] section below.
+#
+# [project.scripts]
+# aws-cache = "aws_cache:main"
+#
+# [tool.setuptools]
+# py-modules = ["aws_cache"]
+
+# Pytest configuration
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+# Uncomment to enable coverage during pytest runs:
+# addopts = "-v --tb=short --cov=aws_cache --cov-report=term-missing --cov-report=html"
+
+# Coverage configuration
+[tool.coverage.run]
+source = ["aws_cache"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+precision = 2
+show_missing = true
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+# Type checking (mypy) - optional
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+
+# Linting with ruff - optional
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    "build",
+    "dist",
+    "*.egg-info",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+# Black configuration (code formatter) - optional
+[tool.black]
+line-length = 100
+target-version = ['py38']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | venv
+  | _build
+  | buck-out
+  | build
+  | dist
+  | \.eggs
+)/
+'''

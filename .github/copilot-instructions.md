@@ -38,6 +38,58 @@ A lightweight Python3 wrapper that adds intelligent caching to AWS CLI commands.
 - **Clear Cache**: `aws-cache --cache-clear`
 - **Environment Test**: `AWS_PROFILE=myprofile ./aws-cache ec2 describe-instances` (verify profile isolation)
 
+## Test-Driven Development (TDD)
+
+All new features must follow strict Red-Green-Refactor (RGR) discipline:
+
+### Red Phase
+Write a **failing test first**—never implement code before the test exists. Tests define the contract. Run with `pytest tests/test_*.py -v` and verify FAIL status. Use skeleton test patterns from [NEXT_FEATURES.md](NEXT_FEATURES.md) as templates. Each test must be independent: isolated temp caches, mocked AWS CLI/APIs, no shared state.
+
+### Green Phase
+Write **minimal code** to make the test pass—no over-engineering. Implement only what the failing test requires. Run `pytest` again; tests must PASS. This proves the feature works as specified. Coverage doesn't need to be perfect yet; focus on making the test pass.
+
+### Refactor Phase
+**Improve code quality** without changing behavior. Extract duplicated logic, improve naming, optimize performance. Crucially: **all tests must still pass**. Run `pytest --cov=aws_cache tests/ --cov-report=term-missing` to verify coverage (target ≥ 85% overall, ≥ 95% for critical paths). Use separate atomic commits for each phase.
+
+### Example: Cache Statistics Feature
+```bash
+# 1. RED: Copy test skeleton from NEXT_FEATURES.md → tests/test_cache_statistics.py
+# 2. Run: pytest tests/test_cache_statistics.py -v  (expect 3 FAILURES)
+# 3. GREEN: Implement _get_cache_stats() in AWSCache class (minimal code)
+# 4. Run: pytest tests/test_cache_statistics.py -v  (expect 3 PASSES)
+# 5. REFACTOR: Extract stats logic into helper method
+# 6. Run: pytest tests/test_cache_statistics.py -v  (expect 3 PASSES + coverage check)
+# 7. git add tests/ && git commit -m "RED: Add cache statistics tests"
+# 8. git add aws-cache && git commit -m "GREEN: Implement cache stats feature"
+# 9. git commit --amend -m "REFACTOR: Extract stats into AWSCache._compute_stats()"
+```
+
+### Mocking & Isolation
+- **Subprocess**: Use `monkeypatch.setattr` or `unittest.mock.patch` for `subprocess.run()`
+- **environ**: Use `monkeypatch.setenv()` or `patch.dict(os.environ)` for `AWS_PROFILE`, `AWS_CACHE_DIR`
+- **urllib**: Mock `urllib.request.urlopen()` to stub AWS Service Reference API responses
+- **Cache dir**: Each test gets isolated temp directory via `tmp_path` fixture
+- **Never**: Use real AWS credentials, make real API calls, or write to `~/.aws-cache/`
+
+### Coverage Requirements
+- Overall: **≥ 85%** (catches regressions, not perfection)
+- Critical paths (cache ops, classification): **≥ 95%** (bulletproof)
+- Edge cases (errors, timeouts): **100%** (no surprises)
+- Run: `pytest --cov=aws_cache --cov-report=html tests/` → view `htmlcov/index.html`
+
+### Next Features (Priority Order)
+See [NEXT_FEATURES.md](NEXT_FEATURES.md) for high-value features with skeleton Red-phase tests:
+1. **Cache Statistics** (hits/misses, eviction tracking)
+2. **Cache Invalidation by Pattern** (selective purge)
+3. **Graceful Degradation** (fallback when APIs unavailable)
+4. **Cache Compression** (gzip, LRU)
+5. **Cache Versioning** (format migration)
+
+### References
+- [TESTING_STRATEGY.md](TESTING_STRATEGY.md) (653 lines: fixtures, mocking patterns, best practices)
+- [TDD_SUMMARY.md](TDD_SUMMARY.md) (execution plan with weekly milestones)
+- [README_TDD.md](README_TDD.md) (quick reference with priority matrix)
+
 ## Project Conventions
 - **Safety over performance**: Always default to NO_CACHE for ambiguous cases
 - **Context isolation**: Cache keyed on profile + region to prevent cross-account leakage

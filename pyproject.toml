@@ -59,20 +59,15 @@ Repository = "https://github.com/earchibald/aws-cache.git"
 Documentation = "https://github.com/earchibald/aws-cache#readme"
 Issues = "https://github.com/earchibald/aws-cache/issues"
 
-# Note on Installation:
-# The aws-cache file remains a standalone executable for maximum portability.
-# For development/testing with pip install -e ".[dev]", users can either:
-# 1. Use the standalone script directly: ./aws-cache <command>
-# 2. Create an alias: alias aws-cache=./aws-cache
-#
-# To make it fully pip-installable with a console script, rename aws-cache → aws_cache.py
-# and uncomment the [project.scripts] section below.
-#
-# [project.scripts]
-# aws-cache = "aws_cache:main"
-#
-# [tool.setuptools]
-# py-modules = ["aws_cache"]
+# Installation: aws-cache is installed as a console script entry point
+# Use: pip install . or pip install -e ".[dev]" for development
+# After install, run: aws-cache sts get-caller-identity
+
+[project.scripts]
+aws-cache = "aws_cache:main"
+
+[tool.setuptools]
+py-modules = ["aws_cache"]
 
 # Pytest configuration
 [tool.pytest.ini_options]

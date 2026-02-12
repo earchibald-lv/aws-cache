@@ -5,15 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
-# Load the aws-cache executable directly
-aws_cache_path = Path(__file__).parent.parent / "aws-cache"
-with open(aws_cache_path, 'r') as f:
-    code = f.read()
-
-# Execute the code in a namespace to extract AWSCache
-namespace = {}
-exec(code, namespace)
-AWSCache = namespace['AWSCache']
+from aws_cache import AWSCache
 
 
 @pytest.fixture

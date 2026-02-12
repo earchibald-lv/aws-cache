@@ -1,0 +1,641 @@
+#!/usr/bin/env python3
+"""
+AWS CLI Caching Wrapper
+
+A drop-in replacement for the AWS CLI that caches results to improve performance.
+Simply replace 'aws' with 'aws-cache' in your commands.
+
+Usage:
+    aws-cache <any-aws-cli-command>
+
+Basic Examples:
+    aws-cache ec2 describe-instances
+    aws-cache s3 ls s3://my-bucket
+    aws-cache iam list-users --output table
+    aws-cache sts get-caller-identity
+
+Cache Control:
+    --no-cache          Skip cache for this command
+    --cache-ttl SECONDS Override default cache time (300 seconds)
+    --cache-clear       Clear all cached data
+    --cache-dir DIR     Use custom cache directory
+
+Setup:
+    --completions bash  Enable tab completion: eval "$(aws-cache --completions bash)"
+    --version          Show version
+    --help             Show this help
+
+Environment Variables:
+    AWS_CACHE_DISABLE=1    Disable caching globally
+    AWS_CACHE_TTL=600      Change default cache time
+    AWS_CACHE_DIR=path     Use custom cache location
+
+What Gets Cached:
+    ✓ Read operations (describe, list, get, show)
+    ✗ Write operations (create, delete, update, modify)
+
+Smart Features:
+    • Automatically corrects common mistakes (like 'aws-cache aws ...')
+    • Works with any AWS CLI arguments and profiles
+    • Isolates cache by AWS profile and region
+    • Provides helpful tips when needed
+"""
+
+import json
+import os
+import sys
+import hashlib
+import subprocess
+import time
+from pathlib import Path
+import argparse
+import shlex
+
+try:
+    import urllib.request
+    import urllib.error
+    URLLIB_AVAILABLE = True
+except ImportError:
+    URLLIB_AVAILABLE = False
+
+VERSION = "0.4.0"
+
+class AWSCache:
+    def __init__(self, cache_dir=None, default_ttl=300):
+        self.cache_dir = Path(cache_dir or os.environ.get('AWS_CACHE_DIR',
+                                                         os.path.expanduser('~/.aws-cache')))
+        self.cache_dir.mkdir(exist_ok=True)
+        self.default_ttl = int(os.environ.get('AWS_CACHE_TTL', default_ttl))
+
+    def _get_aws_context(self):
+        """Get AWS context (profile, region) for cache key uniqueness"""
+        context = {}
+
+        # Get current profile
+        context['profile'] = os.environ.get('AWS_PROFILE', 'default')
+
+        # Get current region
+        region = os.environ.get('AWS_DEFAULT_REGION')
+        if not region:
+            # Try to get from AWS config
+            try:
+                result = subprocess.run(['aws', 'configure', 'get', 'region'],
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    region = result.stdout.strip()
+            except:
+                pass
+        context['region'] = region or 'us-east-1'
+
+        return context
+
+    def _normalize_aws_args(self, aws_args):
+        """Normalize AWS CLI arguments for consistent cache keys"""
+        if not aws_args:
+            return aws_args
+
+        normalized = []
+        flags = {}
+
+        # Process arguments
+        i = 0
+        while i < len(aws_args):
+            arg = aws_args[i]
+
+            if arg.startswith('--'):
+                flag_name = arg[2:]  # Remove --
+
+                # Check if next arg is a value for this flag
+                if (i + 1 < len(aws_args) and
+                    not aws_args[i + 1].startswith('--') and
+                    not aws_args[i + 1].startswith('-')):
+                    flags[flag_name] = aws_args[i + 1]
+                    i += 2
+                else:
+                    flags[flag_name] = True  # Boolean flag
+                    i += 1
+            elif arg.startswith('-') and not arg.startswith('--'):
+                # Single character flags (like -h)
+                flag_name = arg[1:]
+                flags[flag_name] = True
+                i += 1
+            else:
+                # Positional argument
+                normalized.append(arg)
+                i += 1
+
+        # Add sorted flags to maintain consistent ordering
+        for flag in sorted(flags.keys()):
+            normalized.append(f"--{flag}")
+            if flags[flag] is not True:
+                normalized.append(str(flags[flag]))
+
+        return normalized
+
+    def _get_cache_key(self, aws_args):
+        """Generate unique cache key for AWS command"""
+        context = self._get_aws_context()
+
+        # Normalize arguments for consistent cache keys
+        normalized_args = self._normalize_aws_args(aws_args)
+
+        # Create cache key from context + normalized command
+        key_data = {
+            'context': context,
+            'command': normalized_args
+        }
+
+        key_string = json.dumps(key_data, sort_keys=True)
+        return hashlib.sha256(key_string.encode()).hexdigest()
+
+    def _get_cache_file(self, cache_key):
+        """Get cache file path for given key"""
+        return self.cache_dir / f"{cache_key}.json"
+
+    def _is_cache_valid(self, cache_file, ttl):
+        """Check if cache file exists and is within TTL"""
+        if not cache_file.exists():
+            return False
+
+        age = time.time() - cache_file.stat().st_mtime
+        return age < ttl
+
+    def _read_cache(self, cache_file):
+        """Read cached result"""
+        try:
+            with open(cache_file, 'r') as f:
+                data = json.load(f)
+                return data.get('stdout', ''), data.get('stderr', ''), data.get('returncode', 0)
+        except (json.JSONDecodeError, KeyError, IOError):
+            return None, None, None
+
+    def _write_cache(self, cache_file, stdout, stderr, returncode, command):
+        """Write result to cache"""
+        try:
+            data = {
+                'stdout': stdout,
+                'stderr': stderr,
+                'returncode': returncode,
+                'command': command,
+                'timestamp': time.time()
+            }
+            with open(cache_file, 'w') as f:
+                json.dump(data, f)
+        except IOError:
+            pass  # Fail silently if can't write cache
+
+    def _get_operation_key(self, aws_args):
+        """Get a cache key for operation type (service + operation)"""
+        if len(aws_args) >= 2:
+            return f"{aws_args[0]} {aws_args[1]}"
+        elif len(aws_args) == 1:
+            return aws_args[0]
+        else:
+            return ""
+
+    def _load_operation_cache(self):
+        """Load cached operation types from disk"""
+        cache_file = self.cache_dir / "operation-types.json"
+        try:
+            if cache_file.exists():
+                with open(cache_file, 'r') as f:
+                    return json.load(f)
+        except:
+            pass
+        return {}
+
+    def _save_operation_cache(self, operation_cache):
+        """Save operation types to cache"""
+        cache_file = self.cache_dir / "operation-types.json"
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump(operation_cache, f, indent=2)
+        except:
+            pass
+
+    def _load_authoritative_cache(self):
+        """Load authoritative AWS service reference cache"""
+        cache_file = self.cache_dir / "aws-service-reference.json"
+        try:
+            if cache_file.exists():
+                # Check if cache is less than 7 days old
+                cache_age = time.time() - cache_file.stat().st_mtime
+                if cache_age < 7 * 24 * 3600:  # 7 days
+                    with open(cache_file, 'r') as f:
+                        return json.load(f)
+        except:
+            pass
+        return {}
+
+    def _save_authoritative_cache(self, action_cache):
+        """Save authoritative AWS service reference cache"""
+        cache_file = self.cache_dir / "aws-service-reference.json"
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump(action_cache, f, indent=2)
+        except:
+            pass
+
+    def _fetch_aws_service_list(self):
+        """Fetch list of AWS services from service reference API"""
+        if not URLLIB_AVAILABLE:
+            return []
+
+        try:
+            with urllib.request.urlopen('https://servicereference.us-east-1.amazonaws.com', timeout=10) as response:
+                return json.loads(response.read().decode())
+        except:
+            return []
+
+    def _fetch_service_definition(self, service_name):
+        """Fetch service definition with action IsWrite flags"""
+        if not URLLIB_AVAILABLE:
+            return {}
+
+        try:
+            url = f"https://servicereference.us-east-1.amazonaws.com/v1/{service_name}/{service_name}.json"
+            with urllib.request.urlopen(url, timeout=10) as response:
+                return json.loads(response.read().decode())
+        except:
+            return {}
+
+    def _build_authoritative_action_cache(self):
+        """Build definitive read/write cache from AWS Service Reference API"""
+        # Only fetch the most essential services initially to keep startup fast
+        essential_services = ['sts', 'ec2', 's3', 'iam']
+
+        print("🔄 Fetching authoritative classifications for essential services...", file=sys.stderr)
+
+        action_cache = {}
+
+        for service in essential_services:
+            print(f"  Fetching {service}...", file=sys.stderr)
+
+            service_def = self._fetch_service_definition(service)
+            if not service_def:
+                continue
+
+            # Extract IsWrite flags for each action
+            for action in service_def.get('Actions', []):
+                action_name = f"{service}:{action['Name']}"
+                is_write = action.get('Annotations', {}).get('Properties', {}).get('IsWrite', False)
+                action_cache[action_name] = 'write' if is_write else 'read'
+
+        print(f"✅ Built authoritative cache with {len(action_cache)} actions for essential services", file=sys.stderr)
+        print(f"  Additional services will be fetched on-demand", file=sys.stderr)
+        return action_cache
+
+    def _fetch_service_on_demand(self, service_name):
+        """Fetch service definition on-demand when needed"""
+        if not hasattr(self, '_authoritative_cache'):
+            self._authoritative_cache = {}
+
+        # Check if we already have this service cached
+        service_actions = {k: v for k, v in self._authoritative_cache.items() if k.startswith(f"{service_name}:")}
+        if service_actions:
+            return  # Already cached
+
+        print(f"🔄 First time using {service_name}, fetching authoritative classification...", file=sys.stderr)
+
+        service_def = self._fetch_service_definition(service_name)
+        if service_def:
+            actions_added = 0
+            # Extract IsWrite flags for each action
+            for action in service_def.get('Actions', []):
+                action_name = f"{service_name}:{action['Name']}"
+                is_write = action.get('Annotations', {}).get('Properties', {}).get('IsWrite', False)
+                self._authoritative_cache[action_name] = 'write' if is_write else 'read'
+                actions_added += 1
+
+            print(f"✅ Cached {actions_added} {service_name} actions for future use", file=sys.stderr)
+
+            # Save updated cache
+            self._save_authoritative_cache(self._authoritative_cache)
+        else:
+            print(f"⚠ Warning: Could not fetch {service_name} definitions, falling back to pattern matching", file=sys.stderr)
+
+    def _get_authoritative_classification(self, aws_args):
+        """Get authoritative read/write classification from AWS Service Reference"""
+        # Load cached authoritative data
+        if not hasattr(self, '_authoritative_cache'):
+            self._authoritative_cache = self._load_authoritative_cache()
+
+            # If cache is empty or stale, rebuild it with common services only
+            if not self._authoritative_cache:
+                self._authoritative_cache = self._build_authoritative_action_cache()
+                if self._authoritative_cache:
+                    self._save_authoritative_cache(self._authoritative_cache)
+
+        # Map CLI command to IAM action
+        iam_action = self._map_cli_to_iam_action(aws_args)
+        if not iam_action:
+            return None
+
+        # Look up in authoritative cache
+        if iam_action in self._authoritative_cache:
+            return self._authoritative_cache[iam_action]
+
+        # If not found and we have a service name, try on-demand fetch
+        service_name = iam_action.split(':')[0] if ':' in iam_action else None
+        if service_name and URLLIB_AVAILABLE:
+            self._fetch_service_on_demand(service_name)
+            return self._authoritative_cache.get(iam_action)
+
+        return None  # Not found, will fallback to IAM-based classification
+
+    def _map_cli_to_iam_action(self, aws_args):
+        """Map AWS CLI command to IAM action"""
+        if len(aws_args) < 2:
+            return None
+
+        service = aws_args[0]
+        operation = aws_args[1]
+
+        # Handle special cases
+        if service == 's3' and operation == 'ls':
+            return 's3:ListBucket'
+        elif service == 's3' and operation == 'cp':
+            return 's3:PutObject'  # Assume write for s3 cp
+        elif service == 's3' and operation == 'rm':
+            return 's3:DeleteObject'
+        elif service == 's3' and operation == 'mv':
+            return 's3:PutObject'  # Move is write operation
+
+        # Convert kebab-case to PascalCase
+        # describe-instances → DescribeInstances
+        iam_operation = ''.join(word.capitalize() for word in operation.split('-'))
+
+        return f"{service}:{iam_operation}"
+
+    def _classify_iam_action_name(self, iam_action):
+        """Classify IAM action as read or write based on naming conventions"""
+        if not iam_action:
+            print(f"⚠ Warning: Empty IAM action - defaulting to write (no cache)", file=sys.stderr)
+            return 'write'
+
+        action_lower = iam_action.lower()
+
+        # Read operation patterns (based on AWS IAM naming conventions)
+        read_patterns = [
+            'describe', 'list', 'get', 'show', 'lookup', 'search',
+            'validate', 'check', 'test', 'preview', 'explain', 'head'
+        ]
+
+        # Write operation patterns
+        write_patterns = [
+            'create', 'delete', 'update', 'modify', 'put', 'post',
+            'terminate', 'start', 'stop', 'reboot', 'attach', 'detach',
+            'associate', 'disassociate', 'enable', 'disable', 'reset',
+            'restore', 'import', 'export', 'copy', 'move', 'replace',
+            'add', 'remove', 'set', 'unset', 'authorize', 'revoke',
+            'register', 'deregister', 'install', 'uninstall'
+        ]
+
+        # Check for read patterns first
+        for pattern in read_patterns:
+            if pattern in action_lower:
+                return 'read'
+
+        # Check for write patterns
+        for pattern in write_patterns:
+            if pattern in action_lower:
+                return 'write'
+
+        # Default to write for unknown patterns (safer - don't cache unknown operations)
+        print(f"⚠ Warning: Unknown operation type for '{iam_action}' - defaulting to write (no cache)", file=sys.stderr)
+        print(f"  Please report this to help improve classification accuracy", file=sys.stderr)
+        return 'write'
+
+    def _determine_operation_type_iam(self, aws_args):
+        """Determine operation type using IAM action classification (fallback method)"""
+        # Map CLI command to IAM action
+        iam_action = self._map_cli_to_iam_action(aws_args)
+        if not iam_action:
+            print(f"⚠ Warning: Cannot map AWS CLI command to IAM action: {aws_args} - defaulting to write (no cache)", file=sys.stderr)
+            return 'write'
+
+        # Classify based on IAM action name
+        return self._classify_iam_action_name(iam_action)
+
+    def _determine_operation_type_authoritative(self, aws_args):
+        """Determine operation type using authoritative AWS Service Reference API"""
+        # Try authoritative classification first
+        authoritative_result = self._get_authoritative_classification(aws_args)
+        if authoritative_result:
+            return authoritative_result
+
+        # Fallback to IAM-based classification
+        return self._determine_operation_type_iam(aws_args)
+
+    def _determine_operation_type(self, aws_args):
+        """Determine if operation is read or write, with caching"""
+        if not aws_args:
+            print(f"⚠ Warning: Empty AWS command - defaulting to write (no cache)", file=sys.stderr)
+            return 'write'
+
+        operation_key = self._get_operation_key(aws_args)
+
+        # Load cached operation types
+        if not hasattr(self, '_operation_cache'):
+            self._operation_cache = self._load_operation_cache()
+
+        # Check if we already know this operation type
+        if operation_key in self._operation_cache:
+            return self._operation_cache[operation_key]
+
+        # Use authoritative AWS Service Reference classification
+        operation_type = self._determine_operation_type_authoritative(aws_args)
+
+        # Cache the result
+        self._operation_cache[operation_key] = operation_type
+        self._save_operation_cache(self._operation_cache)
+
+        return operation_type
+
+    def _should_cache_command(self, aws_args):
+        """Determine if command should be cached using dry-run detection"""
+        operation_type = self._determine_operation_type(aws_args)
+        return operation_type == 'read'
+
+    def execute(self, aws_args, use_cache=True, ttl=None):
+        """Execute AWS CLI command with caching"""
+        ttl = ttl or self.default_ttl
+
+        # Check if caching is globally disabled
+        if os.environ.get('AWS_CACHE_DISABLE') == '1':
+            use_cache = False
+
+        # Don't cache unsafe commands
+        if use_cache and not self._should_cache_command(aws_args):
+            use_cache = False
+
+        cache_key = self._get_cache_key(aws_args) if use_cache else None
+        cache_file = self._get_cache_file(cache_key) if cache_key else None
+
+        # Try to use cache
+        if use_cache and cache_file and self._is_cache_valid(cache_file, ttl):
+            stdout, stderr, returncode = self._read_cache(cache_file)
+            if stdout is not None:
+                return stdout, stderr, returncode
+
+        # Execute AWS CLI command
+        try:
+            cmd = ['aws'] + aws_args
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+            stdout = result.stdout
+            stderr = result.stderr
+            returncode = result.returncode
+
+            # Cache successful read operations
+            if use_cache and returncode == 0 and cache_file:
+                self._write_cache(cache_file, stdout, stderr, returncode, aws_args)
+
+            return stdout, stderr, returncode
+
+        except subprocess.TimeoutExpired:
+            return '', 'AWS CLI command timed out', 124
+        except FileNotFoundError:
+            return '', 'AWS CLI not found in PATH', 127
+
+    def clear_cache(self):
+        """Clear entire cache"""
+        for cache_file in self.cache_dir.glob('*.json'):
+            try:
+                cache_file.unlink()
+            except OSError:
+                pass
+
+def handle_aws_args(aws_args):
+    """Smart handling of AWS arguments with user feedback and auto-correction"""
+    if not aws_args:
+        return aws_args
+
+    # Auto-correct leading 'aws' prefix (most common user error)
+    if aws_args[0] == 'aws':
+        print("✓ Auto-corrected: Removed redundant 'aws' prefix", file=sys.stderr)
+        print("  Tip: Use 'aws-cache -- aws ...' for explicit AWS prefix", file=sys.stderr)
+        return aws_args[1:]
+
+    # Warn about potential argument confusion
+    aws_cache_flags = {'--cache-ttl', '--cache-dir', '--no-cache', '--cache-clear', '--completions', '--version'}
+    mixed_cache_flags = [arg for arg in aws_args if arg in aws_cache_flags]
+
+    if mixed_cache_flags:
+        print(f"⚠ Warning: AWS-cache flags found in AWS command: {mixed_cache_flags}", file=sys.stderr)
+        print("  These will be passed to AWS CLI (may cause errors)", file=sys.stderr)
+        print("  Tip: Place cache flags before AWS command or use --", file=sys.stderr)
+
+    return aws_args
+
+def main():
+    # Parse our wrapper arguments
+    parser = argparse.ArgumentParser(description='AWS CLI Caching Wrapper', add_help=False)
+    parser.add_argument('--no-cache', action='store_true', help='Disable caching')
+    parser.add_argument('--cache-ttl', type=int, help='Cache TTL in seconds')
+    parser.add_argument('--cache-clear', action='store_true', help='Clear cache and exit')
+    parser.add_argument('--cache-dir', help='Cache directory')
+    parser.add_argument('--completions', choices=['bash'], help='Generate shell completions')
+    parser.add_argument('--version', action='store_true', help='Show version')
+    parser.add_argument('--help', action='store_true', help='Show help')
+
+    # Handle -- separator for explicit argument separation
+    argv = sys.argv[1:]  # Remove script name
+    if '--' in argv:
+        # Split arguments at --
+        separator_idx = argv.index('--')
+        cache_args = argv[:separator_idx]
+        full_aws_cmd = argv[separator_idx + 1:]
+
+        # Parse our cache arguments
+        args = parser.parse_args(cache_args)
+
+        # Enhanced structure: --profile {profile} aws {subcommands} {args}
+        if len(full_aws_cmd) >= 3 and full_aws_cmd[0] == '--profile':
+            # Extract profile and set environment
+            profile = full_aws_cmd[1]
+            os.environ['AWS_PROFILE'] = profile
+
+            # Remaining should be: aws {subcommands} {args}
+            if full_aws_cmd[2] == 'aws':
+                aws_args = full_aws_cmd[3:]  # Skip 'aws' prefix
+            else:
+                # Fallback: treat everything after profile as aws args
+                aws_args = full_aws_cmd[2:]
+        elif len(full_aws_cmd) >= 1 and full_aws_cmd[0] == 'aws':
+            # Format: aws {subcommands} {args}
+            aws_args = full_aws_cmd[1:]
+        else:
+            # Direct AWS args (backward compatibility)
+            aws_args = full_aws_cmd
+    else:
+        # Parse only known args to allow AWS CLI passthrough
+        args, aws_args = parser.parse_known_args(argv)
+
+    if args.version:
+        print(f"aws-cache {VERSION}")
+        return 0
+
+    if args.help:
+        print(__doc__)
+        return 0
+
+    if args.completions:
+        if args.completions == 'bash':
+            # Check if aws_completer exists and setup completion
+            try:
+                # First check if aws_completer exists
+                check_result = subprocess.run(['command', '-v', 'aws_completer'],
+                                            capture_output=True, text=True, shell=True)
+                if check_result.returncode == 0:
+                    # Get the path using which
+                    which_result = subprocess.run(['which', 'aws_completer'],
+                                                capture_output=True, text=True)
+                    if which_result.returncode == 0:
+                        completer_path = which_result.stdout.strip()
+                        print(f"complete -C {completer_path} aws-cache")
+                        return 0
+                    else:
+                        print("aws autocomplete is not installed.", file=sys.stderr)
+                        return 1
+                else:
+                    print("aws autocomplete is not installed.", file=sys.stderr)
+                    return 1
+            except:
+                print("aws autocomplete is not installed.", file=sys.stderr)
+                return 1
+        return 0
+
+    # Initialize cache
+    cache = AWSCache(cache_dir=args.cache_dir, default_ttl=args.cache_ttl or 300)
+
+    if args.cache_clear:
+        cache.clear_cache()
+        print("Cache cleared", file=sys.stderr)
+        return 0
+
+    if not aws_args:
+        print("Error: No AWS CLI command provided", file=sys.stderr)
+        print("Usage: aws-cache [options] <aws-cli-command>", file=sys.stderr)
+        return 1
+
+    # Apply smart argument handling
+    aws_args = handle_aws_args(aws_args)
+
+    # Execute with caching
+    stdout, stderr, returncode = cache.execute(
+        aws_args,
+        use_cache=not args.no_cache,
+        ttl=args.cache_ttl
+    )
+
+    # Output results
+    if stdout:
+        print(stdout, end='')
+    if stderr:
+        print(stderr, end='', file=sys.stderr)
+
+    return returncode
+
+if __name__ == '__main__':
+    sys.exit(main())

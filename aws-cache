@@ -528,6 +528,38 @@ class AWSCache:
         """Get cache statistics (hits, misses, total calls)."""
         return self._stats.copy()
 
+    def invalidate_cache_by_pattern(self, service=None, region=None):
+        """Invalidate cache entries matching the given pattern."""
+        import json
+        
+        deleted_count = 0
+        for cache_file in self.cache_dir.glob('*.json'):
+            # Skip metadata files
+            if cache_file.name in ('operation-types.json', 'aws-service-reference.json'):
+                continue
+            
+            try:
+                with open(cache_file, 'r') as f:
+                    data = json.load(f)
+                    command = data.get('command', [])
+                    
+                    # Check if matches service pattern
+                    if service and len(command) >= 1 and command[0] == service:
+                        cache_file.unlink()
+                        deleted_count += 1
+                        continue
+                    
+                    # Check if matches region pattern
+                    if region and '--region' in command:
+                        region_idx = command.index('--region')
+                        if region_idx + 1 < len(command) and command[region_idx + 1] == region:
+                            cache_file.unlink()
+                            deleted_count += 1
+            except (json.JSONDecodeError, IOError, ValueError):
+                pass
+        
+        return deleted_count
+
     def clear_cache(self):
         """Clear entire cache"""
         for cache_file in self.cache_dir.glob('*.json'):

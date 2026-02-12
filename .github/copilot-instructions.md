@@ -114,13 +114,15 @@ Follow **semver** (MAJOR.MINOR.PATCH):
 - **Update README.md** Version History section with changelog entry
 
 ## Git Hygiene
-- **Commit messages**: Use imperative mood ("Add profile extraction" not "Added profile extraction")
-- **Atomic commits**: One logical change per commit; independent fixes in separate commits
-- **Branch naming**: Use descriptive prefixes: `feature/`, `fix/`, `docs/` (e.g., `feature/authoritative-classification`)
-- **Rebase before merge**: Keep history linear; rebase onto main before opening PR
-- **PR descriptions**: Link related issues, explain why changes matter, include test evidence
-- **No force pushes** to main; use squash merge for feature branches to keep history clean
-- **Sign commits** (optional but recommended): `git commit -S` for GPG signing on releases
+Use the **Git Hygiene** custom agent to validate commit messages, branch naming, merge readiness, and release preparation. The agent is **read-only by design** and runs as a subagent to catch violations before they reach main.
+
+**Quick tasks:**
+- Validate commit messages before push: `@git-hygiene validate-commit "Your message here"`
+- Check branch readiness for PR: `@git-hygiene validate-branch feature/your-branch`
+- Audit commits for merge readiness: `@git-hygiene audit-merge main..your-branch`
+- Prepare release with semver validation: `@git-hygiene prepare-release --to v0.5.0`
+
+See [.github/agents/git-hygiene.agent.md](.github/agents/git-hygiene.agent.md) for full enforcement standards and remediation guidance.
 
 ## GitHub Workflow
 - **Issues**: Describe classification failures (e.g., "operation X reported as read but is actually write") with minimal reproduction

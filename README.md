@@ -1,6 +1,6 @@
-# AWS CLI Caching Wrapper v0.4.0
+# AWS CLI Caching Wrapper v0.4.1
 
-A high-performance caching layer for AWS CLI commands that reduces API calls, improves response times, and maintains accuracy. Features intelligent argument normalization, enhanced command structures, smart argument handling, and authoritative read/write detection for maximum cache efficiency and user-friendliness.
+A high-performance, security-hardened caching layer for AWS CLI commands that reduces API calls, improves response times, and maintains accuracy. Features intelligent argument normalization, enhanced command structures, smart argument handling, and authoritative read/write detection for maximum cache efficiency and user-friendliness.
 
 ## Installation
 
@@ -26,6 +26,10 @@ aws-cache --no-cache ec2 describe-instances      # Skip cache
 aws-cache --cache-ttl 600 iam list-users         # Custom cache time
 aws-cache --cache-clear                           # Clear all cache
 
+# VPN/Corporate Proxy Support
+aws-cache --allow-insecure-ssl ec2 describe-instances  # For environments with SSL inspection
+AWS_CACHE_ALLOW_INSECURE_SSL=1 aws-cache sts get-caller-identity
+
 # Works with all AWS CLI features
 aws-cache ec2 describe-instances --profile prod --region us-west-2 --output json
 AWS_CACHE_DISABLE=1 aws-cache sts get-caller-identity
@@ -48,9 +52,11 @@ $ aws-cache aws sts get-caller-identity
 - **🔄 Drop-in Replacement**: Works with any existing AWS CLI command
 - **⚡ Fast**: Cached responses return in milliseconds instead of seconds
 - **🛡️ Safe**: Only caches read operations, never write operations
+- **🔒 Secure**: Hardened against command injection, path traversal, and credential leaks
 - **🎯 Smart**: Auto-corrects common mistakes and provides helpful tips
 - **🏷️ Context Aware**: Separate cache per AWS profile and region
 - **⚙️ Configurable**: Custom cache time, directory, and disable options
+- **🌐 VPN/Proxy Ready**: Support for corporate SSL inspection environments
 - **📊 Proven**: 25%+ performance improvement in benchmarks
 - **🚨 Fail-Safe**: Defaults to no-cache for unknown operations with warnings
 
@@ -67,6 +73,19 @@ $ aws-cache aws sts get-caller-identity
   - **Perfect accuracy**: No more false positives from keyword matching
 
 ## Version History
+
+### v0.4.1 🔒
+- **Security Hardening**: Comprehensive security review and improvements
+  - Fixed CRITICAL command injection vulnerability (shell=True)
+  - Added input validation for all user inputs (profiles, services, paths, arguments)
+  - Implemented secure file permissions (0600 for cache files, 0700 for directories)
+  - Added SSL certificate verification with VPN/proxy support
+  - Added credential detection to prevent caching sensitive data (AKIA/ASIA/AIDA keys)
+  - Added path traversal protection with directory depth limits
+  - Cross-platform temp directory support (Windows compatible)
+- **Code Quality**: Added type hints, specific exception handling, and improved error messages
+- **VPN/Proxy Support**: Added --allow-insecure-ssl flag and AWS_CACHE_ALLOW_INSECURE_SSL env var
+- **Bug Fixes**: Fixed uninitialized variables in exception handlers
 
 ### v0.4.0 🎯
 - **AWS Service Reference API**: 100% authoritative classification using AWS's own `IsWrite` flags
@@ -86,6 +105,16 @@ $ aws-cache aws sts get-caller-identity
 - **Future-Proof**: Automatically supports new AWS services and operations
 
 ## Safety Features
+
+**Security Hardening (v0.4.1):**
+- ✅ **Command Injection Protection**: All subprocess calls use lists (never shell=True)
+- ✅ **Input Validation**: Strict validation for profiles, services, cache paths, and arguments
+- ✅ **Secure File Permissions**: Cache files (0600) and directories (0700) are owner-only
+- ✅ **Credential Detection**: Prevents caching of AWS credentials (Access Keys, Secret Keys, Session Tokens)
+- ✅ **Path Traversal Protection**: Cache directory limited to home and temp directories with depth limits
+- ✅ **SSL Certificate Verification**: Validates AWS Service Reference API certificates by default
+- ✅ **Control Character Filtering**: Rejects arguments with null bytes and control characters
+- ✅ **Atomic File Writes**: Uses temp files with atomic renames to prevent corruption
 
 **Automatic Write Detection**: Commands containing these keywords are never cached:
 - create, delete, update, modify, put, post

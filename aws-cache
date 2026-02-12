@@ -19,6 +19,7 @@ Cache Control:
     --cache-ttl SECONDS Override default cache time (300 seconds)
     --cache-clear       Clear all cached data
     --cache-dir DIR     Use custom cache directory
+    --allow-insecure-ssl Allow insecure SSL (for VPN/proxy environments)
 
 Setup:
     --completions bash  Enable tab completion: eval "$(aws-cache --completions bash)"
@@ -26,9 +27,10 @@ Setup:
     --help             Show this help
 
 Environment Variables:
-    AWS_CACHE_DISABLE=1    Disable caching globally
-    AWS_CACHE_TTL=600      Change default cache time
-    AWS_CACHE_DIR=path     Use custom cache location
+    AWS_CACHE_DISABLE=1           Disable caching globally
+    AWS_CACHE_TTL=600             Change default cache time
+    AWS_CACHE_DIR=path            Use custom cache location
+    AWS_CACHE_ALLOW_INSECURE_SSL=1 Allow insecure SSL connections
 
 What Gets Cached:
     ✓ Read operations (describe, list, get, show)
@@ -47,32 +49,97 @@ import sys
 import hashlib
 import subprocess
 import time
+import stat
+import re
+import tempfile
 from pathlib import Path
+from typing import Optional, Tuple, List, Dict, Any
 import argparse
 import shlex
 
 try:
     import urllib.request
     import urllib.error
+    import ssl
     URLLIB_AVAILABLE = True
 except ImportError:
     URLLIB_AVAILABLE = False
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
+
+# Security constants
+CACHE_FILE_MODE = 0o600  # Owner read/write only
+CACHE_DIR_MODE = 0o700   # Owner read/write/execute only
+MAX_CACHE_DIR_DEPTH = 3  # Maximum directory depth for safety
 
 class AWSCache:
-    def __init__(self, cache_dir=None, default_ttl=300):
-        self.cache_dir = Path(cache_dir or os.environ.get('AWS_CACHE_DIR',
-                                                         os.path.expanduser('~/.aws-cache')))
-        self.cache_dir.mkdir(exist_ok=True)
+    def __init__(self, cache_dir: Optional[str] = None, default_ttl: int = 300, allow_insecure_ssl: bool = False):
+        # Validate and sanitize cache directory path
+        cache_path = cache_dir or os.environ.get('AWS_CACHE_DIR', os.path.expanduser('~/.aws-cache'))
+        self.cache_dir = self._validate_cache_dir(cache_path)
+        
+        # Create cache directory with secure permissions
+        self.cache_dir.mkdir(mode=CACHE_DIR_MODE, exist_ok=True)
+        # Ensure permissions are correct even if directory already exists
+        self.cache_dir.chmod(CACHE_DIR_MODE)
+        
         self.default_ttl = int(os.environ.get('AWS_CACHE_TTL', default_ttl))
+        
+        # SSL configuration for VPN/corporate proxy environments
+        self.allow_insecure_ssl = allow_insecure_ssl or os.environ.get('AWS_CACHE_ALLOW_INSECURE_SSL') == '1'
+        if self.allow_insecure_ssl:
+            print("⚠️  WARNING: SSL certificate verification is DISABLED", file=sys.stderr)
+            print("   This should only be used in trusted VPN/corporate proxy environments", file=sys.stderr)
+    
+    def _validate_cache_dir(self, cache_path: str) -> Path:
+        """Validate cache directory path to prevent path traversal attacks"""
+        try:
+            # Resolve to absolute path
+            resolved_path = Path(cache_path).resolve()
+            
+            # Ensure path is within user's home directory or system temp directory for safety
+            home_dir = Path.home().resolve()
+            tmp_dir = Path(tempfile.gettempdir()).resolve()
+            
+            # Check if path starts with allowed directories
+            is_in_home = str(resolved_path).startswith(str(home_dir))
+            is_in_tmp = str(resolved_path).startswith(str(tmp_dir))
+            
+            if not (is_in_home or is_in_tmp):
+                print(f"⚠ Warning: Cache directory must be in home or temp. Using default.", file=sys.stderr)
+                resolved_path = home_dir / '.aws-cache'
+            
+            # Check path depth to prevent excessive nesting
+            try:
+                relative_to_home = resolved_path.relative_to(home_dir)
+                if len(relative_to_home.parts) > MAX_CACHE_DIR_DEPTH:
+                    print(f"⚠ Warning: Cache directory too deep. Using default.", file=sys.stderr)
+                    resolved_path = home_dir / '.aws-cache'
+            except ValueError:
+                # Not relative to home, check if in temp
+                if is_in_tmp:
+                    relative_to_tmp = resolved_path.relative_to(tmp_dir)
+                    if len(relative_to_tmp.parts) > MAX_CACHE_DIR_DEPTH:
+                        print(f"⚠ Warning: Cache directory too deep. Using default.", file=sys.stderr)
+                        resolved_path = home_dir / '.aws-cache'
+            
+            return resolved_path
+        except (ValueError, RuntimeError) as e:
+            print(f"⚠ Warning: Invalid cache directory: {e}. Using default.", file=sys.stderr)
+            return Path.home().resolve() / '.aws-cache'
 
-    def _get_aws_context(self):
+    def _get_aws_context(self) -> Dict[str, str]:
         """Get AWS context (profile, region) for cache key uniqueness"""
         context = {}
 
-        # Get current profile
-        context['profile'] = os.environ.get('AWS_PROFILE', 'default')
+        # Get current profile - validate it's a safe string
+        profile = os.environ.get('AWS_PROFILE', 'default')
+        # Sanitize profile name to prevent injection
+        if re.match(r'^[a-zA-Z0-9_-]+$', profile):
+            context['profile'] = profile
+        else:
+            print(f"⚠ Warning: Invalid AWS_PROFILE format, using 'default'", file=sys.stderr)
+            context['profile'] = 'default'
 
         # Get current region
         region = os.environ.get('AWS_DEFAULT_REGION')
@@ -83,8 +150,17 @@ class AWSCache:
                                       capture_output=True, text=True, timeout=5)
                 if result.returncode == 0:
                     region = result.stdout.strip()
-            except:
+                    # Validate region format
+                    if not re.match(r'^[a-z0-9-]+$', region):
+                        region = None
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
                 pass
+        
+        # Validate region format if provided
+        if region and not re.match(r'^[a-z0-9-]+$', region):
+            print(f"⚠ Warning: Invalid region format, using 'us-east-1'", file=sys.stderr)
+            region = 'us-east-1'
+        
         context['region'] = region or 'us-east-1'
 
         return context
@@ -132,7 +208,7 @@ class AWSCache:
 
         return normalized
 
-    def _get_cache_key(self, aws_args):
+    def _get_cache_key(self, aws_args: List[str]) -> str:
         """Generate unique cache key for AWS command"""
         context = self._get_aws_context()
 
@@ -146,13 +222,16 @@ class AWSCache:
         }
 
         key_string = json.dumps(key_data, sort_keys=True)
-        return hashlib.sha256(key_string.encode()).hexdigest()
+        return hashlib.sha256(key_string.encode('utf-8')).hexdigest()
 
-    def _get_cache_file(self, cache_key):
+    def _get_cache_file(self, cache_key: str) -> Path:
         """Get cache file path for given key"""
+        # Validate cache key is hexadecimal
+        if not re.match(r'^[a-f0-9]{64}$', cache_key):
+            raise ValueError(f"Invalid cache key format")
         return self.cache_dir / f"{cache_key}.json"
 
-    def _is_cache_valid(self, cache_file, ttl):
+    def _is_cache_valid(self, cache_file: Path, ttl: int) -> bool:
         """Check if cache file exists and is within TTL"""
         if not cache_file.exists():
             return False
@@ -160,18 +239,62 @@ class AWSCache:
         age = time.time() - cache_file.stat().st_mtime
         return age < ttl
 
-    def _read_cache(self, cache_file):
+    def _read_cache(self, cache_file: Path) -> Tuple[Optional[str], Optional[str], Optional[int]]:
         """Read cached result"""
         try:
+            # Verify file permissions before reading
+            file_stat = cache_file.stat()
+            file_mode = stat.S_IMODE(file_stat.st_mode)
+            
+            # Warn if permissions are too open
+            if file_mode & 0o077:  # Check if group or others have any permissions
+                print(f"⚠ Warning: Cache file has insecure permissions, skipping", file=sys.stderr)
+                return None, None, None
+            
             with open(cache_file, 'r') as f:
                 data = json.load(f)
                 return data.get('stdout', ''), data.get('stderr', ''), data.get('returncode', 0)
-        except (json.JSONDecodeError, KeyError, IOError):
+        except (json.JSONDecodeError, KeyError, IOError, OSError):
             return None, None, None
 
-    def _write_cache(self, cache_file, stdout, stderr, returncode, command):
-        """Write result to cache"""
+    def _contains_sensitive_data(self, data: str) -> bool:
+        """Check if data potentially contains AWS credentials or sensitive information"""
+        if not data:
+            return False
+        
+        # Patterns that suggest sensitive data
+        # AWS Access Key IDs are 20 characters total:
+        # - AKIA (long-term credentials) + 16 alphanumeric = 20 chars total
+        # - ASIA (temporary/session credentials) + 16 alphanumeric = 20 chars total
+        # - AIDA (IAM user IDs) + 16 alphanumeric = 20 chars total
+        sensitive_patterns = [
+            r'A[KS]IA[0-9A-Z]{16}',  # AWS Access Key ID (AKIA or ASIA) - 20 chars total
+            r'AIDA[0-9A-Z]{16}',      # IAM User ID - 20 chars total
+            r'aws_secret_access_key',
+            r'aws_session_token',
+            r'"SecretAccessKey"',
+            r'"SessionToken"',
+            r'"Credentials"',
+        ]
+        
+        for pattern in sensitive_patterns:
+            if re.search(pattern, data, re.IGNORECASE):
+                return True
+        
+        return False
+
+    def _write_cache(self, cache_file: Path, stdout: str, stderr: str, returncode: int, command: List[str]) -> None:
+        """Write result to cache with secure file permissions"""
+        temp_file = None
         try:
+            # Security check: Don't cache if output contains credentials
+            if self._contains_sensitive_data(stdout) or self._contains_sensitive_data(stderr):
+                print("⚠ Security: Not caching response with potential credentials", file=sys.stderr)
+                return
+            
+            # Create temp file with secure permissions first
+            temp_file = cache_file.with_suffix('.tmp')
+            
             data = {
                 'stdout': stdout,
                 'stderr': stderr,
@@ -179,10 +302,25 @@ class AWSCache:
                 'command': command,
                 'timestamp': time.time()
             }
-            with open(cache_file, 'w') as f:
+            
+            # Write to temp file with secure permissions
+            with open(temp_file, 'w') as f:
                 json.dump(data, f)
-        except IOError:
-            pass  # Fail silently if can't write cache
+            
+            # Set secure permissions (owner read/write only)
+            temp_file.chmod(CACHE_FILE_MODE)
+            
+            # Atomic rename
+            temp_file.replace(cache_file)
+            
+        except (IOError, OSError) as e:
+            # Clean up temp file if it exists
+            if temp_file and temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except (IOError, OSError):
+                    pass
+            # Fail silently if can't write cache
 
     def _get_operation_key(self, aws_args):
         """Get a cache key for operation type (service + operation)"""
@@ -204,14 +342,26 @@ class AWSCache:
             pass
         return {}
 
-    def _save_operation_cache(self, operation_cache):
-        """Save operation types to cache"""
+    def _save_operation_cache(self, operation_cache: Dict[str, str]) -> None:
+        """Save operation types to cache with secure permissions"""
         cache_file = self.cache_dir / "operation-types.json"
+        temp_file = None
         try:
-            with open(cache_file, 'w') as f:
+            temp_file = cache_file.with_suffix('.tmp')
+            with open(temp_file, 'w') as f:
                 json.dump(operation_cache, f, indent=2)
-        except:
-            pass
+            
+            # Set secure permissions
+            temp_file.chmod(CACHE_FILE_MODE)
+            
+            # Atomic rename
+            temp_file.replace(cache_file)
+        except (IOError, OSError):
+            if temp_file and temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except (IOError, OSError):
+                    pass
 
     def _load_authoritative_cache(self):
         """Load authoritative AWS service reference cache"""
@@ -227,36 +377,110 @@ class AWSCache:
             pass
         return {}
 
-    def _save_authoritative_cache(self, action_cache):
-        """Save authoritative AWS service reference cache"""
+    def _save_authoritative_cache(self, action_cache: Dict[str, str]) -> None:
+        """Save authoritative AWS service reference cache with secure permissions"""
         cache_file = self.cache_dir / "aws-service-reference.json"
+        temp_file = None
         try:
-            with open(cache_file, 'w') as f:
+            temp_file = cache_file.with_suffix('.tmp')
+            with open(temp_file, 'w') as f:
                 json.dump(action_cache, f, indent=2)
-        except:
-            pass
+            
+            # Set secure permissions
+            temp_file.chmod(CACHE_FILE_MODE)
+            
+            # Atomic rename
+            temp_file.replace(cache_file)
+        except (IOError, OSError):
+            if temp_file and temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except (IOError, OSError):
+                    pass
 
-    def _fetch_aws_service_list(self):
-        """Fetch list of AWS services from service reference API"""
+    def _create_ssl_context(self) -> ssl.SSLContext:
+        """Create SSL context with appropriate certificate verification settings"""
+        if self.allow_insecure_ssl:
+            # Create context that doesn't verify certificates (for VPN/proxy environments)
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            return ssl_context
+        else:
+            # Create secure context with full certificate verification
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+            
+            # Try to load system certificates in addition to defaults
+            try:
+                ssl_context.load_default_certs()
+            except (OSError, ssl.SSLError):
+                pass  # Continue with default certificates
+            
+            return ssl_context
+
+    def _fetch_aws_service_list(self) -> List[str]:
+        """Fetch list of AWS services from service reference API with SSL verification"""
         if not URLLIB_AVAILABLE:
             return []
 
         try:
-            with urllib.request.urlopen('https://servicereference.us-east-1.amazonaws.com', timeout=10) as response:
-                return json.loads(response.read().decode())
-        except:
+            # Create SSL context based on configuration
+            ssl_context = self._create_ssl_context()
+            
+            req = urllib.request.Request(
+                'https://servicereference.us-east-1.amazonaws.com',
+                headers={'User-Agent': f'aws-cache/{VERSION}'}
+            )
+            
+            with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
+                # Validate response
+                if response.status != 200:
+                    return []
+                
+                data = json.loads(response.read().decode('utf-8'))
+                return data if isinstance(data, list) else []
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, 
+                ssl.SSLError, ValueError, TimeoutError) as e:
+            print(f"⚠ Warning: Could not fetch AWS service list: {type(e).__name__}", file=sys.stderr)
             return []
 
-    def _fetch_service_definition(self, service_name):
-        """Fetch service definition with action IsWrite flags"""
+    def _fetch_service_definition(self, service_name: str) -> Dict[str, Any]:
+        """Fetch service definition with action IsWrite flags and SSL verification"""
         if not URLLIB_AVAILABLE:
             return {}
 
+        # Validate service name to prevent injection
+        if not re.match(r'^[a-z0-9-]+$', service_name):
+            print(f"⚠ Warning: Invalid service name format: {service_name}", file=sys.stderr)
+            return {}
+
         try:
+            # Create SSL context based on configuration
+            ssl_context = self._create_ssl_context()
+            
             url = f"https://servicereference.us-east-1.amazonaws.com/v1/{service_name}/{service_name}.json"
-            with urllib.request.urlopen(url, timeout=10) as response:
-                return json.loads(response.read().decode())
-        except:
+            req = urllib.request.Request(
+                url,
+                headers={'User-Agent': f'aws-cache/{VERSION}'}
+            )
+            
+            with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
+                # Validate response
+                if response.status != 200:
+                    return {}
+                
+                data = json.loads(response.read().decode('utf-8'))
+                
+                # Validate structure
+                if not isinstance(data, dict):
+                    return {}
+                
+                return data
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
+                ssl.SSLError, ValueError, TimeoutError) as e:
+            print(f"⚠ Warning: Could not fetch {service_name} definition: {type(e).__name__}", file=sys.stderr)
             return {}
 
     def _build_authoritative_action_cache(self):
@@ -457,8 +681,51 @@ class AWSCache:
         operation_type = self._determine_operation_type(aws_args)
         return operation_type == 'read'
 
-    def execute(self, aws_args, use_cache=True, ttl=None):
+    def _sanitize_aws_args(self, aws_args: List[str]) -> List[str]:
+        """Sanitize AWS arguments to prevent command injection.
+        
+        Allows tab, newline, and carriage return characters since AWS CLI arguments
+        may legitimately contain these (e.g., in JSON payloads, multiline strings).
+        Rejects null bytes and other control characters that should never appear
+        in valid AWS CLI arguments.
+        
+        Args:
+            aws_args: List of AWS CLI arguments to sanitize
+            
+        Returns:
+            List of sanitized arguments with dangerous control characters removed
+        """
+        if not aws_args:
+            return aws_args
+        
+        sanitized = []
+        # Regular expression to match control characters
+        # Excludes: tab (\x09), newline (\x0a), carriage return (\x0d)
+        # Rejects: null bytes and all other control characters (\x00-\x08, \x0b-\x0c, \x0e-\x1f)
+        control_char_pattern = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+        
+        for arg in aws_args:
+            # Ensure arguments are strings
+            if not isinstance(arg, str):
+                continue
+            
+            # Check for null bytes or other control characters
+            if control_char_pattern.search(arg):
+                print(f"⚠ Warning: Rejected argument with control characters", file=sys.stderr)
+                continue
+            
+            sanitized.append(arg)
+        
+        return sanitized
+
+    def execute(self, aws_args: List[str], use_cache: bool = True, ttl: Optional[int] = None) -> Tuple[str, str, int]:
         """Execute AWS CLI command with caching"""
+        # Sanitize input arguments
+        aws_args = self._sanitize_aws_args(aws_args)
+        
+        if not aws_args:
+            return '', 'Error: No valid AWS CLI arguments provided', 1
+        
         ttl = ttl or self.default_ttl
 
         # Check if caching is globally disabled
@@ -535,6 +802,8 @@ def main():
     parser.add_argument('--cache-ttl', type=int, help='Cache TTL in seconds')
     parser.add_argument('--cache-clear', action='store_true', help='Clear cache and exit')
     parser.add_argument('--cache-dir', help='Cache directory')
+    parser.add_argument('--allow-insecure-ssl', action='store_true', 
+                       help='Allow insecure SSL (for VPN/corporate proxy environments)')
     parser.add_argument('--completions', choices=['bash'], help='Generate shell completions')
     parser.add_argument('--version', action='store_true', help='Show version')
     parser.add_argument('--help', action='store_true', help='Show help')
@@ -552,9 +821,14 @@ def main():
 
         # Enhanced structure: --profile {profile} aws {subcommands} {args}
         if len(full_aws_cmd) >= 3 and full_aws_cmd[0] == '--profile':
-            # Extract profile and set environment
+            # Extract profile and set environment with validation
             profile = full_aws_cmd[1]
-            os.environ['AWS_PROFILE'] = profile
+            # Validate profile name to prevent injection
+            if re.match(r'^[a-zA-Z0-9_-]+$', profile):
+                os.environ['AWS_PROFILE'] = profile
+            else:
+                print(f"⚠ Warning: Invalid profile name format: {profile}", file=sys.stderr)
+                return 1
 
             # Remaining should be: aws {subcommands} {args}
             if full_aws_cmd[2] == 'aws':
@@ -582,32 +856,32 @@ def main():
 
     if args.completions:
         if args.completions == 'bash':
-            # Check if aws_completer exists and setup completion
+            # Check if aws_completer exists without shell=True to prevent command injection
             try:
-                # First check if aws_completer exists
-                check_result = subprocess.run(['command', '-v', 'aws_completer'],
-                                            capture_output=True, text=True, shell=True)
-                if check_result.returncode == 0:
-                    # Get the path using which
-                    which_result = subprocess.run(['which', 'aws_completer'],
-                                                capture_output=True, text=True)
-                    if which_result.returncode == 0:
-                        completer_path = which_result.stdout.strip()
-                        print(f"complete -C {completer_path} aws-cache")
+                # Use direct command execution without shell
+                which_result = subprocess.run(['which', 'aws_completer'],
+                                            capture_output=True, text=True, timeout=5)
+                if which_result.returncode == 0:
+                    completer_path = which_result.stdout.strip()
+                    # Validate path to prevent injection
+                    if completer_path and Path(completer_path).exists():
+                        # Escape the path properly for shell completion
+                        print(f"complete -C {shlex.quote(completer_path)} aws-cache")
                         return 0
-                    else:
-                        print("aws autocomplete is not installed.", file=sys.stderr)
-                        return 1
-                else:
-                    print("aws autocomplete is not installed.", file=sys.stderr)
-                    return 1
-            except:
+                
+                print("aws autocomplete is not installed.", file=sys.stderr)
+                return 1
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
                 print("aws autocomplete is not installed.", file=sys.stderr)
                 return 1
         return 0
 
     # Initialize cache
-    cache = AWSCache(cache_dir=args.cache_dir, default_ttl=args.cache_ttl or 300)
+    cache = AWSCache(
+        cache_dir=args.cache_dir, 
+        default_ttl=args.cache_ttl or 300,
+        allow_insecure_ssl=args.allow_insecure_ssl
+    )
 
     if args.cache_clear:
         cache.clear_cache()

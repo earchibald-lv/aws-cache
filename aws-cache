@@ -51,6 +51,7 @@ import subprocess
 import time
 import stat
 import re
+import tempfile
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any
 import argparse
@@ -96,16 +97,16 @@ class AWSCache:
             # Resolve to absolute path
             resolved_path = Path(cache_path).resolve()
             
-            # Ensure path is within user's home directory or /tmp for safety
+            # Ensure path is within user's home directory or system temp directory for safety
             home_dir = Path.home().resolve()
-            tmp_dir = Path('/tmp').resolve()
+            tmp_dir = Path(tempfile.gettempdir()).resolve()
             
             # Check if path starts with allowed directories
             is_in_home = str(resolved_path).startswith(str(home_dir))
             is_in_tmp = str(resolved_path).startswith(str(tmp_dir))
             
             if not (is_in_home or is_in_tmp):
-                print(f"⚠ Warning: Cache directory must be in home or /tmp. Using default.", file=sys.stderr)
+                print(f"⚠ Warning: Cache directory must be in home or temp. Using default.", file=sys.stderr)
                 resolved_path = home_dir / '.aws-cache'
             
             # Check path depth to prevent excessive nesting
@@ -115,7 +116,7 @@ class AWSCache:
                     print(f"⚠ Warning: Cache directory too deep. Using default.", file=sys.stderr)
                     resolved_path = home_dir / '.aws-cache'
             except ValueError:
-                # Not relative to home, check if in /tmp
+                # Not relative to home, check if in temp
                 if is_in_tmp:
                     relative_to_tmp = resolved_path.relative_to(tmp_dir)
                     if len(relative_to_tmp.parts) > MAX_CACHE_DIR_DEPTH:
@@ -262,8 +263,13 @@ class AWSCache:
             return False
         
         # Patterns that suggest sensitive data
+        # AWS Access Key IDs can start with:
+        # - AKIA (long-term credentials)
+        # - ASIA (temporary/session credentials)
+        # - AIDA (IAM user IDs)
         sensitive_patterns = [
-            r'AKIA[0-9A-Z]{16}',  # AWS Access Key ID
+            r'A[KS]IA[0-9A-Z]{16}',  # AWS Access Key ID (AKIA or ASIA)
+            r'AIDA[0-9A-Z]{16}',      # IAM User ID
             r'aws_secret_access_key',
             r'aws_session_token',
             r'"SecretAccessKey"',
@@ -271,7 +277,6 @@ class AWSCache:
             r'"Credentials"',
         ]
         
-        data_lower = data.lower()
         for pattern in sensitive_patterns:
             if re.search(pattern, data, re.IGNORECASE):
                 return True
@@ -682,7 +687,9 @@ class AWSCache:
             return aws_args
         
         sanitized = []
-        # Regular expression to match control characters (except tab, newline, carriage return)
+        # Regular expression to match control characters
+        # Excludes: tab (\x09), newline (\x0a), carriage return (\x0d)
+        # Rejects: null bytes and all other control characters (\x00-\x08, \x0b-\x0c, \x0e-\x1f)
         control_char_pattern = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
         
         for arg in aws_args:

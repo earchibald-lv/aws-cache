@@ -560,6 +560,36 @@ class AWSCache:
         
         return deleted_count
 
+    def get_cache_size(self):
+        """Get total cache size in bytes and return dict with size info."""
+        total_size = 0
+        file_count = 0
+        
+        for cache_file in self.cache_dir.glob('*.json'):
+            # Skip metadata files
+            if cache_file.name in ('operation-types.json', 'aws-service-reference.json'):
+                continue
+            
+            try:
+                total_size += cache_file.stat().st_size
+                file_count += 1
+            except OSError:
+                pass
+        
+        # Convert to human-readable format
+        def format_size(bytes_size):
+            for unit in ['B', 'KB', 'MB', 'GB']:
+                if bytes_size < 1024:
+                    return f"{bytes_size:.1f} {unit}"
+                bytes_size /= 1024
+            return f"{bytes_size:.1f} TB"
+        
+        return {
+            'total_bytes': total_size,
+            'total_formatted': format_size(total_size),
+            'file_count': file_count
+        }
+
     def clear_cache(self):
         """Clear entire cache"""
         for cache_file in self.cache_dir.glob('*.json'):
